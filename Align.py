@@ -1,13 +1,10 @@
 import nrrd
-import os
 import numpy as np
-import cv2
-import pandas as pd
 import pickle as pk
-import matplotlib.pyplot as plt
 from skimage.transform import PiecewiseAffineTransform, warp
 from tqdm import tqdm
 import skimage
+from bead_finder import *
 
 # The position of the original point in NRRD file.
 NRRD_CERTER_POSITION = (104, 106, 114)
@@ -28,34 +25,6 @@ def load_reference_data():
     data, header = nrrd.read(nrrd_directory)
     df = pd.read_csv(query_directory)
     return data, df
-
-def mouse_click_nrrd(event, x, y, flags, param):
-    '''
-    Use for getting click points in nrrd file
-    :param event:
-    :param x:
-    :param y:
-    :param flags:
-    :param param:
-    :return:
-    '''
-    global click_point_nrrd
-    if event == cv2.EVENT_LBUTTONDOWN:
-        click_point_nrrd  = (x, y)
-
-def mouse_click_real(event, x, y, flags, param):
-    '''
-    Use for getting click points in real images
-    :param event:
-    :param x:
-    :param y:
-    :param flags:
-    :param param:
-    :return:
-    '''
-    global click_point_real
-    if event == cv2.EVENT_LBUTTONDOWN:
-        click_point_real  = (x, y)
 
 
 def nrrd2ImageList(data, save_directory="nrrd_reference", show=True):
@@ -105,7 +74,7 @@ def get_adaptive_threshold(img_gray, show=False):
         temp = hist_full[i: i + window_size].reshape((window_size  , ))
         if np.gradient(temp).max() < 0 and (temp.sum() / float(window_size)) < hist_ave:
             return i
-    return 30
+    return 25
 
 
 def is_in_center(centerPonit, real_img):
@@ -122,11 +91,11 @@ def is_in_center(centerPonit, real_img):
     else:
         return False
 
-def get_convex_hull(real_img, show_real=False, show_binary=False, constant_threshold=None):
+def get_convex_hull(real_img, show_real=False, show_binary=False, constant_threshold=None, approximate=True):
     '''
     Calculatet the convex hull (contours) of the brain in the image
-    :param real_img:
-    :return: convex hull
+    :param real_img: The image for brain tissue
+    :return: convex hull the approximating  contours
     '''
     if len(real_img.shape) == 3:
         real_img = cv2.cvtColor(real_img, cv2.COLOR_BGR2GRAY)
@@ -153,7 +122,10 @@ def get_convex_hull(real_img, show_real=False, show_binary=False, constant_thres
         center = (int(x + w * 0.5), int(y + h * 0.5))
         if cv2.contourArea(contours[i]) > 2e5:
             if is_in_center(center, real_img):
-                hull = cv2.convexHull(contours[i])
+                if approximate:
+                    hull = cv2.convexHull(contours[i])
+                else:
+                    hull = contours[i]
                 if show_real:
                     cv2.rectangle(img_2_show, (x, y), (x + w, y + h), (255, 255, 0), 5)
                     cv2.drawContours(img_2_show, [hull], 0, (255, 255, 255), 1, 8)
@@ -190,9 +162,9 @@ def get_radioactive_lines(center, length=1300.):
 def calculate_intersection_point(hull, img_real, show=False):
     '''
     Get the feature points from the contours of brain in the img_real
-    :param hull:
-    :param img_real:
-    :param show:
+    :param hull: The convex hull
+    :param img_real: The image for real tissue
+    :param show: If show, then will show the middle result
     :return:
     '''
 
@@ -292,19 +264,23 @@ def createLineIterator(P1, P2, img):
 
 def show_img(img, introduction=False):
     '''
-    display the img in a proper size
-    :param img:
+    Show the image in a proper size
+    :param img: The image to show
+    :param introduction: if true, will display instructions on image
     :return:
     '''
     img_show = img.copy()
     img_show = cv2.resize(img_show, (int(img_show.shape[1] * 0.5), int(img_show.shape[0] * 0.5)))
     if introduction:
-        cv2.putText(img_show, '> reduce weight', (100, 50), fontFace=cv2.FONT_HERSHEY_DUPLEX, fontScale=1, color=(255, 255, 255))
-        cv2.putText(img_show, '< increase weight', (50, 100), fontFace=cv2.FONT_HERSHEY_DUPLEX, fontScale=1,
+        cv2.putText(img_show, 'q: reduce weight', (50, 50), fontFace=cv2.FONT_HERSHEY_DUPLEX, fontScale=1,
                     color=(255, 255, 255))
-        cv2.putText(img_show, '^ previous frame', (100, 150), fontFace=cv2.FONT_HERSHEY_DUPLEX, fontScale=1,
+        cv2.putText(img_show, 'e: increase weight', (50, 100), fontFace=cv2.FONT_HERSHEY_DUPLEX, fontScale=1,
                     color=(255, 255, 255))
-        cv2.putText(img_show, 'v next frame', (100, 200), fontFace=cv2.FONT_HERSHEY_DUPLEX, fontScale=1,
+        cv2.putText(img_show, 'a: previous frame', (50, 150), fontFace=cv2.FONT_HERSHEY_DUPLEX, fontScale=1,
+                    color=(255, 255, 255))
+        cv2.putText(img_show, 'd: next frame', (50, 200), fontFace=cv2.FONT_HERSHEY_DUPLEX, fontScale=1,
+                    color=(255, 255, 255))
+        cv2.putText(img_show, 's: quit', (50, 250), fontFace=cv2.FONT_HERSHEY_DUPLEX, fontScale=1,
                     color=(255, 255, 255))
     cv2.imshow('img_show', img_show)
     key = cv2.waitKey()
@@ -347,7 +323,7 @@ def get_pure_brain_nrrd(nrrd_frame, refactored_nrrd_center):
 
     return nrrd_frame, nrrd_center
 
-def pre_calibrate_single_frame(img_frame, nrrd_frame):
+def pre_calibrate_single_frame(img_frame, nrrd_frame, show=False):
     '''
     Transform the position of the brain in the nrrd frame to adapt image frame
     :param img_frame:
@@ -361,13 +337,18 @@ def pre_calibrate_single_frame(img_frame, nrrd_frame):
     th = cv2.erode(th, kernel, iterations=2)
     _, contours, _ = cv2.findContours(th, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
 
+
     img_2_show = img_frame.copy()
 
     for i in range(len(contours)):
-        if cv2.contourArea(contours[i]) > 3e5 and cv2.contourArea(contours[i]) < 1e7:
-            x, y, w, h = cv2.boundingRect(contours[i])
-            cv2.rectangle(img_2_show, (x, y), (x + w, y + h), (255, 255, 0), 5)
-
+        if cv2.contourArea(contours[i]) > 2e5 and cv2.contourArea(contours[i]) < 1e7:
+            x_t, y_t, w_t, h_t = cv2.boundingRect(contours[i])
+            point_t = (int(x_t + 0.5 * w_t), int(y_t + 0.5 * h_t))
+            if is_in_center(point_t, img_2_show):
+                x, y, w, h = cv2.boundingRect(contours[i])
+                cv2.rectangle(img_2_show, (x, y), (x + w, y + h), (255, 255, 0), 5)
+                if show:
+                    show_img(img_2_show, False)
     cur_h = 0
     cur_w = 0
     (height, length) = nrrd_frame.shape
@@ -377,9 +358,17 @@ def pre_calibrate_single_frame(img_frame, nrrd_frame):
     for col in range(length):
         if np.asarray(nrrd_frame[:, col]).sum() > 0:
             cur_w += 1
+    try:
+        w_factor = float(w)/float(cur_w)
+        h_factor = float(h) / float(cur_h)
+    except:
+        img_2_show = img_frame.copy()
 
-    w_factor = float(w)/float(cur_w)
-    h_factor = float(h) / float(cur_h)
+        for i in range(len(contours)):
+            # print(cv2.contourArea(contours[i]))
+            x, y, w, h = cv2.boundingRect(contours[i])
+            cv2.rectangle(img_2_show, (x, y), (x + w, y + h), (255, 255, 0), 5)
+            show_img(img_2_show, False)
 
     refactored_nrrd_center = (int(NRRD_CERTER_POSITION[2] * w_factor), int(NRRD_CERTER_POSITION[1] * h_factor))
 
@@ -409,19 +398,19 @@ def pre_calibrate_single_frame(img_frame, nrrd_frame):
 
 def affin_transform(img_frame, nrrd_frame):
     '''
-    transform the nrrd_frame to fit the tissue image frame
+    transform the shape of nrrd_frame to fit the tissue image frame
     :param img_frame:
     :param nrrd_frame:
     :return:
     '''
-    hull = get_convex_hull(img_frame)
+    hull = get_convex_hull(img_frame, False, False)
     point_img_list = calculate_intersection_point(hull, img_frame, False)
     x = int(img_frame.shape[1] * 0.5)
     y = int(img_frame.shape[0] * 0.5)
     point_img_list.append((x, y))
     point_img_list = np.float32(point_img_list)
 
-    nrrd_frame_reference, nrrd_frame_clean = pre_calibrate_single_frame(img_frame, nrrd_frame)
+    nrrd_frame_reference, nrrd_frame_clean = pre_calibrate_single_frame(img_frame, nrrd_frame, False)
 
     hull_nrrd = get_convex_hull(nrrd_frame_reference, False, False, 1)
 
@@ -457,30 +446,45 @@ def calculate_shift(img_dir):
     shift = NRRD_CERTER_POSITION[0] - index
     return shift
 
-def get_transformed_nrrd_list(img_dir):
+def get_transformed_nrrd_list(img_dir, save_dir):
     '''
     get a list of transformed nrrd file
     :param img_dir:
     :return:
     '''
-    def z_key(elem):
-        return -float(elem.split(',')[-1].strip().split('.tif')[0])
-    tif_list = os.listdir(img_dir)
-    tif_list.sort(key=z_key)
+    if len(os.listdir(save_dir)) > 0:
+        transformed_nrrd_list = []
+        def sort_key(elem):
+            return int(elem.split('.tif')[0])
 
-    f = open("nrrd_reference/nrrd_plot.pickle", 'rb')
-    nrrd_plot_data = pk.load(f)
-    shift = calculate_shift(img_dir)
+        img_dir_list = os.listdir(save_dir)
+        img_dir_list.sort(key=sort_key )
+        for img_dir in img_dir_list:
+            img = cv2.imread(os.path.join(save_dir, img_dir))
+            img = np.asarray(img).astype(np.float32)
+            transformed_nrrd = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) / 255.
+            transformed_nrrd_list.append(transformed_nrrd)
+    else:
 
-    transformed_nrrd_list = []
-    print("Calculating........")
-    for i in tqdm(range(len(tif_list))):
-        tif_name = tif_list[i]
-        nrrd_frame = nrrd_plot_data[i + shift]
-        img_frame = cv2.imread(os.path.join(img_dir, tif_name))
-        transformed_nrrd = affin_transform(img_frame, nrrd_frame)
-        transformed_nrrd_list.append(transformed_nrrd)
-    print("Finished!")
+        def z_key(elem):
+            return -float(elem.split(',')[-1].strip().split('.tif')[0])
+        tif_list = os.listdir(img_dir)
+        tif_list.sort(key=z_key)
+
+        f = open("nrrd_reference/nrrd_plot.pickle", 'rb')
+        nrrd_plot_data = pk.load(f)
+        shift = calculate_shift(img_dir)
+
+        transformed_nrrd_list = []
+        print("Calculating........")
+        for i in tqdm(range(len(tif_list))):
+            tif_name = tif_list[i]
+            nrrd_frame = nrrd_plot_data[i + shift]
+            img_frame = cv2.imread(os.path.join(img_dir, tif_name))
+            transformed_nrrd = affin_transform(img_frame, nrrd_frame)
+            transformed_nrrd_list.append(transformed_nrrd)
+        print("Finished!")
+
     return transformed_nrrd_list
 
 def save_tif(img_dir, save_folder="transformed_nrrd"):
@@ -490,7 +494,7 @@ def save_tif(img_dir, save_folder="transformed_nrrd"):
     :param save_folder:
     :return:
     '''
-    transformed_nrrd_list = get_transformed_nrrd_list(img_dir)
+    transformed_nrrd_list = get_transformed_nrrd_list(img_dir, save_folder)
     if not os.path.exists(save_folder):
         os.mkdir(save_folder)
     for nrrd_index in range(len(transformed_nrrd_list)):
@@ -498,10 +502,13 @@ def save_tif(img_dir, save_folder="transformed_nrrd"):
         img = np.asarray(img * 255).astype(np.uint8)
         skimage.io.imsave(os.path.join(save_folder, '%d.tif'%nrrd_index), img, plugin='tifffile')
 
-def main(img_dir):
+def present(img_dir, root_dir, save_dir, plot_bead=False):
     '''
-    Used for presenting the result
-    :param img_dir:
+    Use for presenting single brain images
+    :param img_dir: The folder holding the brain images
+    :param root_dir: actually the root dir here means [root dir] + [folder of brain id]
+    :param save_dir: The folder used for saving result given by save_main function. The present function will detect whether there are existing availabe result.
+    :param plot_bead: if true, the result given by bead_finder will be presented on the image
     :return:
     '''
     def z_key(elem):
@@ -511,42 +518,89 @@ def main(img_dir):
 
     weight = 0.5
 
-    transformed_nrrd_list = get_transformed_nrrd_list(img_dir)
+    transformed_nrrd_list = get_transformed_nrrd_list(img_dir, save_dir)
     index = 0
+    if plot_bead:
+        layer_dict = get_pixel_points_layer_dict(root_dir)
+
     while(True):
 
         tif_name = tif_list[index]
         img_frame = cv2.imread(os.path.join(img_dir, tif_name))
+
         transformed_nrrd = transformed_nrrd_list[index]
 
         img_gray = cv2.cvtColor(img_frame, cv2.COLOR_BGR2GRAY) / 255.
-        img_frame_sum = cv2.addWeighted(img_gray.copy(), weight, transformed_nrrd * 6., 1 - weight, 0)
-        key = show_img(img_frame_sum, True)
 
-        if key == 81:
+        img_frame_sum = cv2.addWeighted(img_gray.copy().astype(np.float32), weight, transformed_nrrd * 6., 1 - weight, 0)
+
+        if plot_bead:
+            tif_key = -z_key(tif_name)
+            if tif_key in layer_dict:
+                for point in layer_dict[tif_key]:
+                    cv2.circle(img_frame_sum, point, 15, (255, 255, 255), thickness=5)
+
+        key = show_img(img_frame_sum, True)
+        if key == 101:
             weight -= 0.01
             if weight < 0:
                 weight = 1.
-        elif key == 83:
+        elif key == 113:
             weight += 0.01
             if weight > 1:
                 weight = 0.
-        elif key == 113:
+        elif key == 115:
             break
-        elif key == 82:
+        elif key == 97:
             index += 1
             if index >= len(tif_list):
                 index = 0
-        elif key == 84:
+        elif key == 100:
             index -= 1
             if index < 0:
                 index = len(tif_list) - 1
 
+def save_main(root_dir="/home/silasi/brain_imgs/processed_images/"):
+    '''
+    The function for calculating and saving the nrrd image.
+    The structure for holding data should be:
+    [root dir] / [id for the brain] / [id for the brain]-aligned[id for the image].tif
+    :param root_dir:
+    :return:
+    '''
+    save_folder = "/" + root_dir.split('/')[0]
+    for item in root_dir.split('/')[1: -2]:
+        save_folder = os.path.join(save_folder, item)
+    save_folder = os.path.join(save_folder, "transformed_nrrd")
+    if not os.path.exists(save_folder):
+        os.mkdir(save_folder)
+    name_list = os.listdir(root_dir)
+    for name in name_list:
+        img_dir = os.path.join(root_dir, name, "3 - Processed Images", "7 - Counted Reoriented Stacks Renamed")
+        save_dir = os.path.join(save_folder, name)
+        if not os.path.exists(save_dir):
+            os.mkdir(save_dir)
+        print("working on " + name + "...")
+        save_tif(img_dir, save_dir)
+
+def present_main(root_dir="/home/silasi/brain_imgs/processed_images/"):
+    '''
+    The function for presenting the transformed nrrd and make it a mask on the real tissue image
+    :param root_dir:
+    :return:
+    '''
+    save_folder = "/" + root_dir.split('/')[0]
+    for item in root_dir.split('/')[1: -2]:
+        save_folder = os.path.join(save_folder, item)
+    save_folder = os.path.join(save_folder, "transformed_nrrd")
+    name_list = os.listdir(root_dir)
+    for name in name_list:
+        print(name)
+        img_dir = os.path.join(root_dir, name, "3 - Processed Images", "7 - Counted Reoriented Stacks Renamed")
+        save_dir = os.path.join(save_folder, name)
+        present(img_dir, os.path.join(root_dir, name), save_dir)
 
 
 if __name__ == '__main__':
-    rootDir = "/home/silasi/73594-2"
-    img_dir = os.path.join(rootDir, "3 - Processed Images", "7 - Counted Reoriented Stacks Renamed")
-
-    main(img_dir)
-    # save_tif(img_dir)
+    present_main()
+    # save_main()
